@@ -1,0 +1,247 @@
+REPORT z_mass_abap_download_local.
+
+*---------------------------------------------------------------------*
+* Classe: lcl_exportador_programas
+* Objetivo: Realiza a exportação local de objetos ABAP do tipo:
+*           - Programas (REPs)
+*           - Funções (FUNCTIONs)
+*           - Enhancements (includes)
+* Autor: Luiz Guni
+* Data: 19/07/2025
+*---------------------------------------------------------------------*
+
+CLASS lcl_exportador_programas DEFINITION.
+  PUBLIC SECTION.
+    METHODS:
+      constructor IMPORTING iv_folder TYPE localfile,     "Construtor: armazena o diretório de destino
+      exporta_programas,                                  "Exporta todos os programas Z* ativos
+      exporta_funcoes,                                    "Exporta todas as funções Z* (via READ REPORT)
+      exporta_enhancements,                               "Exporta includes Z* de enhancements
+      salvar_fonte IMPORTING iv_name TYPE progname,       "Salva o código-fonte de um objeto como .txt
+      exibir_log,                                         "Mostra o log da exportação em popup
+      gravar_log_em_arquivo.                              "Grava o log da exportação em um arquivo .txt
+  PRIVATE SECTION.
+    DATA:
+      mv_folder TYPE localfile,                           "Caminho informado pelo usuário
+      mt_log    TYPE STANDARD TABLE OF string.            "Tabela interna para mensagens de log
+ENDCLASS.
+
+CLASS lcl_exportador_programas IMPLEMENTATION.
+
+  METHOD constructor.
+    " Armazena o diretório escolhido pelo usuário
+    mv_folder = iv_folder.
+  ENDMETHOD.
+
+  METHOD exporta_programas.
+    " Seleciona todos os programas Z* ativos da tabela TRDIR
+    DATA: lt_programas TYPE STANDARD TABLE OF progname.
+    SELECT name FROM trdir
+      INTO TABLE lt_programas
+      WHERE name LIKE 'Z%' AND subc = '1'. " subc = '1' indica report/programa
+
+    " Laço com barra de progresso
+    DATA(lv_total) = lines( lt_programas ).
+    DATA(lv_count) = 0.
+
+    LOOP AT lt_programas INTO DATA(programa).
+      ADD 1 TO lv_count.
+
+      " Atualiza barra de progresso no GUI
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = lv_count * 100 / lv_total
+          text       = |Exportando programa { programa } ({ lv_count } de { lv_total })|.
+
+      " Exporta o conteúdo do programa
+      salvar_fonte( programa ).
+    ENDLOOP.
+
+    APPEND |Exportação de programas concluída.| TO mt_log.
+  ENDMETHOD.
+
+  METHOD exporta_funcoes.
+    " Seleciona nomes de funções Z* da tabela TFDIR
+    DATA: lt_funcoes TYPE STANDARD TABLE OF funcname.
+    SELECT funcname FROM tfdir
+      INTO TABLE lt_funcoes
+      WHERE funcname LIKE 'Z%'.
+
+    DATA(lv_total) = lines( lt_funcoes ).
+    DATA(lv_count) = 0.
+
+    LOOP AT lt_funcoes INTO DATA(funcao).
+      ADD 1 TO lv_count.
+
+      " Atualiza barra de progresso
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = lv_count * 100 / lv_total
+          text       = |Exportando função { funcao } ({ lv_count } de { lv_total })|.
+
+      " Converte tipo FUNCNAME para PROGNAME antes de passar ao método
+      salvar_fonte( CONV progname( funcao ) ).
+    ENDLOOP.
+
+    APPEND |Exportação de funções concluída.| TO mt_log.
+  ENDMETHOD.
+
+  METHOD exporta_enhancements.
+    " Seleciona includes de enhancements Z* da tabela ENHINCINX
+    DATA: lt_enh TYPE STANDARD TABLE OF progname.
+    SELECT DISTINCT enhinclude
+      FROM enhincinx
+      INTO TABLE lt_enh
+      WHERE enhname LIKE 'Z%' AND version = 'A'. " versão ativa
+
+    DATA(lv_total) = lines( lt_enh ).
+    DATA(lv_count) = 0.
+
+    LOOP AT lt_enh INTO DATA(enhfile).
+      ADD 1 TO lv_count.
+
+      " Barra de progresso visual
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = lv_count * 100 / lv_total
+          text       = |Exportando enhancement { enhfile } ({ lv_count } de { lv_total })|.
+
+      " Exporta enhancement como programa (READ REPORT)
+      salvar_fonte( enhfile ).
+    ENDLOOP.
+
+    APPEND |Exportação de enhancements concluída.| TO mt_log.
+  ENDMETHOD.
+
+  METHOD salvar_fonte.
+    " Lê o código-fonte de um programa/função/include e salva localmente
+    DATA: lt_source TYPE STANDARD TABLE OF string.
+    READ REPORT iv_name INTO lt_source. " Pega o conteúdo como se fosse um programa
+
+    IF sy-subrc = 0.
+      " Monta caminho completo do arquivo
+      DATA(lv_path) = mv_folder && '\' && iv_name && '.txt'.
+
+      " Salva conteúdo usando GUI_DOWNLOAD
+      CALL METHOD cl_gui_frontend_services=>gui_download
+        EXPORTING
+          filename = lv_path
+          filetype = 'ASC'
+        CHANGING
+          data_tab = lt_source.
+
+      APPEND |Arquivo salvo: { lv_path }| TO mt_log.
+    ELSE.
+      APPEND |Erro ao ler programa: { iv_name }| TO mt_log.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD exibir_log.
+    " Mostra todas as mensagens do log na tela
+    LOOP AT mt_log INTO DATA(line).
+      WRITE: / line.
+    ENDLOOP.
+
+    " Mostra popup final de sucesso
+    CALL FUNCTION 'POPUP_TO_DISPLAY_TEXT'
+      EXPORTING
+        textline1 = 'Exportação finalizada.'
+        textline2 = 'Verifique os arquivos no diretório informado.'
+        titel     = 'Sucesso'.
+  ENDMETHOD.
+
+  METHOD gravar_log_em_arquivo.
+    " Grava o log completo em um arquivo export_log.txt
+    DATA(lv_logfile) = mv_folder && '\export_log.txt'.
+    CALL METHOD cl_gui_frontend_services=>gui_download
+      EXPORTING
+        filename = lv_logfile
+        filetype = 'ASC'
+      CHANGING
+        data_tab = mt_log.
+  ENDMETHOD.
+
+ENDCLASS.
+
+*---------------------------------------------------------------------*
+* Tela de seleção (entrada do usuário)
+*---------------------------------------------------------------------*
+PARAMETERS: p_progr  TYPE c RADIOBUTTON GROUP g01,  "Exportar programas
+            p_funcao TYPE c RADIOBUTTON GROUP g01,  "Exportar funções
+            p_enhanc TYPE c RADIOBUTTON GROUP g01.  "Exportar enhancements
+
+PARAMETERS: pfolder TYPE localfile. " Diretório onde arquivos serão salvos
+
+* Evento F4 no campo pfolder: permite escolher a pasta
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR pfolder.
+  DATA: objfile       TYPE REF TO cl_gui_frontend_services,
+        pickedfolder  TYPE string,
+        initialfolder TYPE string.
+
+  IF sy-batch IS INITIAL. " Apenas se não estiver em background
+    CREATE OBJECT objfile.
+    objfile->get_temp_directory( CHANGING temp_dir = initialfolder ).
+
+    objfile->directory_browse(
+      EXPORTING initial_folder = initialfolder
+      CHANGING selected_folder = pickedfolder ).
+
+    IF sy-subrc = 0.
+      pfolder = pickedfolder.
+    ENDIF.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Execução principal do programa
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+  " Cria instância da classe exportadora
+  DATA(lo_exportador) = NEW lcl_exportador_programas( pfolder ).
+
+  " Executa a exportação com base na opção selecionada
+  IF p_progr = 'X'.
+    lo_exportador->exporta_programas( ).
+  ELSEIF p_funcao = 'X'.
+    lo_exportador->exporta_funcoes( ).
+  ELSEIF p_enhanc = 'X'.
+    lo_exportador->exporta_enhancements( ).
+  ENDIF.
+
+  " Exibe e grava log após a exportação
+  lo_exportador->exibir_log( ).
+  lo_exportador->gravar_log_em_arquivo( ).
+
+*---------------------------------------------------------------------*
+* Classe de testes unitários (ABAP Unit)
+*---------------------------------------------------------------------*
+CLASS ltc_exportador DEFINITION FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    METHODS:
+      test_instanciacao       FOR TESTING, "Testa se a classe é instanciada corretamente
+      test_exporta_programas  FOR TESTING, "Testa execução da exportação de programas
+      test_salvar_fonte_vazio FOR TESTING. "Testa leitura de programa inexistente
+ENDCLASS.
+
+CLASS ltc_exportador IMPLEMENTATION.
+
+  METHOD test_instanciacao.
+    DATA(lo) = NEW lcl_exportador_programas( 'C:\TEMP' ).
+    cl_abap_unit_assert=>assert_not_initial( act = lo ).
+  ENDMETHOD.
+
+  METHOD test_exporta_programas.
+    DATA(lo) = NEW lcl_exportador_programas( 'C:\TEMP' ).
+    lo->exporta_programas( ).
+    cl_abap_unit_assert=>assert_true( act = abap_true ).
+  ENDMETHOD.
+
+  METHOD test_salvar_fonte_vazio.
+    DATA(lo) = NEW lcl_exportador_programas( 'C:\TEMP' ).
+    lo->salvar_fonte( 'Z_PROGRAMA_QUE_NAO_EXISTE' ).
+    cl_abap_unit_assert=>assert_true( act = abap_true ).
+  ENDMETHOD.
+
+ENDCLASS.
